@@ -1,0 +1,215 @@
+name: Symbol Audit
+description: Scan code for multi-word symbols, classify with AI team alignment, create tracking issue.
+
+inputs:
+  target:
+    description: 'What to scan: repo, pr, commit:<sha>, branch:<name>, range:<sha1>...<sha2>'
+    required: false
+    default: 'repo'
+  namespace:
+    description: Shared module namespace
+    required: false
+    default: 'symbol-audit'
+  gemini-api-key:
+    description: Gemini API key
+    required: true
+  anthropic-api-key:
+    description: Anthropic API key
+    required: true
+  org:
+    description: GitHub org for membership verification
+    required: true
+  actor:
+    description: GitHub actor for membership verification
+    required: true
+  token:
+    description: GitHub token (needed for private repos when fetching prior issues)
+    required: false
+    default: ${{ github.token }}
+  as-is-gemini:
+    description: Allow Gemini to mark symbols as-is
+    required: false
+    default: 'false'
+  as-is-claude:
+    description: Allow Claude to mark symbols as-is
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # ── Stage 0: Setup ──────────────────────────────────────────────────────
+    - name: Setup octoscript
+      uses: sw2m/octoscript/setup@main
+
+    # ── Stage 1: Scan ──────────────────────────────────────────────────────
+    - name: Scan for multi-word symbols
+      shell: bash
+      env:
+        TARGET: ${{ env.TARGET || inputs.target }}
+        NAMESPACE: ${{ env.NAMESPACE || inputs.namespace }}
+      run: |
+        deno run --allow-read --allow-env \
+          "${{ github.action_path }}/lib/scanner.ts" \
+          --target "$TARGET" \
+          --namespace "$NAMESPACE"
+
+    # ── Fetch prior issues for context ─────────────────────────────────────
+    - name: Fetch last 7 completed audit issues
+      shell: bash
+      env:
+        GH_TOKEN: ${{ env.TOKEN || inputs.token }}
+        NAMESPACE: ${{ env.NAMESPACE || inputs.namespace }}
+      run: |
+        issues=$(gh issue list \
+          --repo "$GITHUB_REPOSITORY" \
+          --state closed \
+          --search "Symbol Audit" \
+          --json number,title,body,stateReason \
+          --limit 20 \
+        | deno eval --ext=ts '
+          const data = JSON.parse(await new Response(Deno.stdin.readable).text());
+          const completed = data
+            .filter((i: any) => i.stateReason === "completed")
+            .slice(0, 7);
+          console.log(JSON.stringify(completed));
+        ')
+        octoscript shared set "${NAMESPACE}/context-issues" "$issues"
+
+    # ── Stage 2: External classification ───────────────────────────────────
+    - name: Classify external symbols
+      uses: sw2m/ci-agents/team@main
+      with:
+        gemini-api-key: ${{ inputs.gemini-api-key }}
+        anthropic-api-key: ${{ inputs.anthropic-api-key }}
+        org: ${{ inputs.org }}
+        actor: ${{ inputs.actor }}
+        prompt-template: ${{ github.action_path }}/prompts/external.mustache
+        schema: ${{ github.action_path }}/schemas/external.json
+        data-key: ${{ inputs.namespace }}/backlog
+        result-key: ${{ inputs.namespace }}/external-results
+        token: ${{ inputs.token }}
+
+    # ── Merge external results ─────────────────────────────────────────────
+    - name: Merge external classifications
+      shell: bash
+      env:
+        NAMESPACE: ${{ env.NAMESPACE || inputs.namespace }}
+      run: |
+        deno eval --ext=ts '
+          const backlog = JSON.parse(Deno.env.get("BACKLOG")!);
+          const results = JSON.parse(Deno.env.get("RESULTS")!);
+          const extMap = new Map(results.symbols.map((s: any) => [s.symbol, s.classification]));
+          const updated = backlog.filter((s: any) => extMap.get(s.symbol) !== "external");
+          const externals = backlog.filter((s: any) => extMap.get(s.symbol) === "external")
+            .map((s: any) => ({ ...s, label: "external" }));
+          // Write back
+          const output = JSON.stringify([...externals, ...updated]);
+          const proc = new Deno.Command("octoscript", {
+            args: ["shared", "set", Deno.env.get("NAMESPACE")! + "/backlog", output],
+          });
+          await proc.output();
+        '
+      env:
+        BACKLOG: ${{ env[format('{0}/backlog', env.NAMESPACE || inputs.namespace)] }}
+        RESULTS: ${{ env[format('{0}/external-results', env.NAMESPACE || inputs.namespace)] }}
+
+    # ── Stage 3: Label classification ──────────────────────────────────────
+    - name: Classify symbol labels
+      uses: sw2m/ci-agents/team@main
+      with:
+        gemini-api-key: ${{ inputs.gemini-api-key }}
+        anthropic-api-key: ${{ inputs.anthropic-api-key }}
+        org: ${{ inputs.org }}
+        actor: ${{ inputs.actor }}
+        prompt-template: ${{ github.action_path }}/prompts/categorize.mustache
+        schema: ${{ github.action_path }}/schemas/categorize.json
+        data-key: ${{ inputs.namespace }}/backlog
+        result-key: ${{ inputs.namespace }}/label-results
+        evaluator: ${{ github.action_path }}/lib/evaluator.ts
+        token: ${{ inputs.token }}
+
+    # ── Stage 4: Post-process and report ───────────────────────────────────
+    - name: Post-process and create issue
+      shell: bash
+      env:
+        GH_TOKEN: ${{ env.TOKEN || inputs.token }}
+        NAMESPACE: ${{ env.NAMESPACE || inputs.namespace }}
+        AS_IS_GEMINI: ${{ env.AS_IS_GEMINI || inputs.as-is-gemini }}
+        AS_IS_CLAUDE: ${{ env.AS_IS_CLAUDE || inputs.as-is-claude }}
+      run: |
+        deno eval --ext=ts '
+          import { evaluate, postProcess } from "${{ github.action_path }}/lib/evaluator.ts";
+
+          const backlog = JSON.parse(Deno.env.get("BACKLOG")!);
+          const geminiResults = JSON.parse(Deno.env.get("GEMINI")!);
+          const claudeResults = JSON.parse(Deno.env.get("CLAUDE")!);
+          const asIsGemini = Deno.env.get("AS_IS_GEMINI") === "true";
+          const asIsClaude = Deno.env.get("AS_IS_CLAUDE") === "true";
+
+          // Evaluate alignment
+          const evalResult = evaluate(
+            backlog.filter((s: any) => !s.label),
+            geminiResults.symbols ?? [],
+            claudeResults.symbols ?? [],
+            { gemini: asIsGemini, claude: asIsClaude },
+          );
+
+          // Post-process: blanks → human-review
+          const final = postProcess(evalResult.symbols);
+
+          // Merge with already-labelled (external) symbols
+          const externals = backlog.filter((s: any) => s.label === "external");
+          const all = [...externals, ...final];
+
+          // Build report
+          const labelCounts: Record<string, number> = {};
+          for (const s of all) {
+            labelCounts[s.label] = (labelCounts[s.label] ?? 0) + 1;
+          }
+
+          let body = "## Symbol Audit Report\n\n";
+          body += `**Total symbols**: ${all.length}\n`;
+          body += `**Aligned**: ${evalResult.aligned} | **Misaligned**: ${evalResult.misaligned}\n\n`;
+
+          body += "### Summary\n\n| Label | Count |\n|---|---|\n";
+          for (const [label, count] of Object.entries(labelCounts).sort((a, b) => b[1] - a[1])) {
+            body += `| \`${label}\` | ${count} |\n`;
+          }
+
+          body += "\n### Symbols\n\n";
+          body += "| Symbol | Label | Kind | File | Line |\n|---|---|---|---|---|\n";
+          for (const s of all.sort((a: any, b: any) => a.label.localeCompare(b.label) || a.symbol.localeCompare(b.symbol))) {
+            body += `| \`${s.symbol}\` | \`${s.label}\` | ${s.kind} | ${s.file} | ${s.line} |\n`;
+          }
+
+          // As-is audit section
+          if (evalResult.asIsAttempts.length > 0) {
+            body += "\n### As-Is Audit\n\n";
+            body += "The following symbols were marked as `as-is` by an agent that is not authorized to do so.\n\n";
+            body += "| Symbol | Agent |\n|---|---|\n";
+            for (const a of evalResult.asIsAttempts) {
+              body += `| \`${a.symbol}\` | ${a.agent} |\n`;
+            }
+          }
+
+          // Create issue
+          const proc = new Deno.Command("gh", {
+            args: [
+              "issue", "create",
+              "--repo", Deno.env.get("GITHUB_REPOSITORY")!,
+              "--title", `Symbol Audit — ${new Date().toISOString().slice(0, 10)}`,
+              "--body", body,
+            ],
+          });
+          const result = await proc.output();
+          if (!result.success) {
+            console.error(new TextDecoder().decode(result.stderr));
+            Deno.exit(1);
+          }
+          console.log(new TextDecoder().decode(result.stdout).trim());
+        '
+      env:
+        BACKLOG: ${{ env[format('{0}/backlog', env.NAMESPACE || inputs.namespace)] }}
+        GEMINI: ${{ env[format('{0}/label-results-gemini', env.NAMESPACE || inputs.namespace)] }}
+        CLAUDE: ${{ env[format('{0}/label-results-claude', env.NAMESPACE || inputs.namespace)] }}

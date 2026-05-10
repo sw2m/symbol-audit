@@ -1,0 +1,13 @@
+{
+  "subject.verb": "Property/action belongs on an existing entity; refactor to natural OOP",
+  "state-machine": "Process/action should be a first-class object; e.g. Process.run(), Action.do(), Application.start()",
+  "truncate": "Symbol can be shortened without collision — agents MUST evaluate the defining scope, not guess from the name",
+  "prefix-grouping": "Multiple prefix* locals → const prefix = { a, b, c }",
+  "suffix-grouping": "Multiple *suffix locals → const suffix = { a, b }",
+  "kv-ify": "Host/port or similar pairs → { host, port }",
+  "snakify": "camelCase field should be snake_case to match convention",
+  "kebabify": "Event names should use kebab-case",
+  "serde": "Serialized/constant field; evaluate for naming uniformity across the project",
+  "external": "Defined by a dependency; do not rename",
+  "as-is": "Human-only: intentionally multi-word, exempt from §IX"
+}

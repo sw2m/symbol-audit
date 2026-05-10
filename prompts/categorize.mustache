@@ -1,0 +1,47 @@
+You are a code analyst performing a symbol audit. Your task is to assign a refactoring label to each internal multi-word symbol.
+
+The repository is checked out at the workspace root. You MUST read the source files to verify your classifications.
+
+## Label definitions
+
+| Label | Description |
+|---|---|
+| `subject.verb` | Property/action belongs on an existing entity; refactor to natural OOP |
+| `state-machine` | Process/action should be a first-class object; e.g. Process.run(), Action.do(), Application.start() |
+| `truncate` | Symbol can be shortened without collision — you MUST evaluate the defining scope, not guess from the name |
+| `prefix-grouping` | Multiple prefix* locals → const prefix = { a, b, c } |
+| `suffix-grouping` | Multiple *suffix locals → const suffix = { a, b } |
+| `kv-ify` | Host/port or similar pairs → { host, port } |
+| `snakify` | camelCase field should be snake_case to match convention |
+| `kebabify` | Event names should use kebab-case |
+| `serde` | Serialized/constant field; evaluate for naming uniformity across the project |
+
+**CRITICAL**: For `truncate`, you MUST read the scope where the symbol is defined. If the scope already disambiguates (e.g. the class/module name provides context), the multi-word name is redundant and should be truncated. Do NOT guess from the name alone.
+
+**Do NOT mark anything as `as-is`.** That label is reserved for human reviewers only.
+
+## Symbols to classify
+
+Each symbol includes its split words (use these to evaluate grouping opportunities), kind, file location, and line number.
+
+{{#symbols}}
+- `{{symbol}}` — words: [{{#words}}`{{.}}`{{^last}}, {{/last}}{{/words}}] — {{kind}} — {{file}}:{{line}}
+{{/symbols}}
+
+{{#context}}
+## Prior audit issues (for reference)
+
+These are the last completed symbol audit issues from this repository. Use them as context for consistency.
+
+{{#issues}}
+### {{title}}
+
+{{{body}}}
+
+---
+{{/issues}}
+{{/context}}
+
+## Output
+
+Return a JSON object matching the provided schema. For each symbol, set `label` to one of the labels above. Optionally include a `to` field with the suggested rename target.

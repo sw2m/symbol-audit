@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "required": ["symbols"],
+  "properties": {
+    "symbols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "label"],
+        "properties": {
+          "symbol": { "type": "string" },
+          "label": {
+            "type": "string",
+            "enum": [
+              "subject.verb",
+              "state-machine",
+              "truncate",
+              "prefix-grouping",
+              "suffix-grouping",
+              "kv-ify",
+              "snakify",
+              "kebabify",
+              "serde",
+              "as-is"
+            ]
+          },
+          "to": { "type": "string", "description": "Rename target (optional)" }
+        }
+      }
+    }
+  }
+}

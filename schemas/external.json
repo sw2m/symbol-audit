@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "required": ["symbols"],
+  "properties": {
+    "symbols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "classification"],
+        "properties": {
+          "symbol": { "type": "string" },
+          "classification": { "type": "string", "enum": ["external", "internal"] }
+        }
+      }
+    }
+  }
+}
